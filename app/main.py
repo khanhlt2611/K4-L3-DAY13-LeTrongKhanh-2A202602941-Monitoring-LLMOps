@@ -4,10 +4,11 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from structlog.contextvars import bind_contextvars
 
 from .agent import LabAgent
+from .dashboard import render_dashboard
 from .incidents import disable, enable, status
 from .logging_config import configure_logging, get_logger
 from .metrics import record_error, snapshot
@@ -20,7 +21,6 @@ configure_logging()
 log = get_logger()
 agent = LabAgent()
 
-
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     log.info(
@@ -31,25 +31,30 @@ async def lifespan(_: FastAPI):
     )
     yield
 
-
 app = FastAPI(title="Day 13 Monitoring & LLMOps Lab", lifespan=lifespan)
 app.add_middleware(CorrelationIdMiddleware)
-
 
 @app.get("/health")
 async def health() -> dict:
     return {"ok": True, "tracing_enabled": tracing_enabled(), "incidents": status()}
 
-
 @app.get("/metrics")
 async def metrics() -> dict:
     return snapshot()
 
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(minutes: int = 60) -> HTMLResponse:
+    return HTMLResponse(render_dashboard(minutes))
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: Request, body: ChatRequest) -> ChatResponse:
-    # TODO: Enrich logs with request context (user_id_hash, session_id, feature, model, env)
-    # bind_contextvars(...)
+    bind_contextvars(
+        user_id_hash=hash_user_id(body.user_id),
+        session_id=body.session_id,
+        feature=body.feature,
+        model=agent.model,
+        env=os.getenv("APP_ENV", "dev"),
+    )
     
     log.info(
         "request_received",
@@ -100,7 +105,6 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         )
         raise HTTPException(status_code=500, detail=error_type) from exc
 
-
 @app.post("/incidents/{name}/enable")
 async def enable_incident(name: str) -> JSONResponse:
     try:
@@ -109,7 +113,6 @@ async def enable_incident(name: str) -> JSONResponse:
         return JSONResponse({"ok": True, "incidents": status()})
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-
 
 @app.post("/incidents/{name}/disable")
 async def disable_incident(name: str) -> JSONResponse:
